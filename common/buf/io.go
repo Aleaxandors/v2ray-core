@@ -16,7 +16,7 @@ var ErrReadTimeout = newError("IO timeout")
 
 // TimeoutReader is a reader that returns error if Read() operation takes longer than the given timeout.
 type TimeoutReader interface {
-	ReadTimeout(time.Duration) (MultiBuffer, error)
+	ReadMultiBufferTimeout(time.Duration) (MultiBuffer, error)
 }
 
 // Writer extends io.Writer with MultiBuffer.
@@ -33,7 +33,7 @@ func ReadFrom(reader io.Reader) Supplier {
 }
 
 // ReadFullFrom creates a Supplier to read full buffer from a given io.Reader.
-func ReadFullFrom(reader io.Reader, size int) Supplier {
+func ReadFullFrom(reader io.Reader, size int32) Supplier {
 	return func(b []byte) (int, error) {
 		return io.ReadFull(reader, b[:size])
 	}
@@ -67,6 +67,7 @@ func NewWriter(writer io.Writer) Writer {
 	}
 }
 
+// NewSequentialWriter returns a Writer that write Buffers in a MultiBuffer sequentially.
 func NewSequentialWriter(writer io.Writer) Writer {
 	return &seqWriter{
 		writer: writer,

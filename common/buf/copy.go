@@ -2,6 +2,7 @@ package buf
 
 import (
 	"io"
+	"time"
 
 	"v2ray.com/core/common/errors"
 	"v2ray.com/core/common/signal"
@@ -36,6 +37,7 @@ func (h *copyHandler) writeTo(writer Writer, mb MultiBuffer) error {
 	return err
 }
 
+// SizeCounter is for counting bytes copied by Copy().
 type SizeCounter struct {
 	Size int64
 }
@@ -91,7 +93,9 @@ func copyInternal(reader Reader, writer Writer, handler *copyHandler) error {
 				buffer.Release()
 				return werr
 			}
-		} else if err != nil {
+		}
+
+		if err != nil {
 			return err
 		}
 	}
@@ -108,4 +112,18 @@ func Copy(reader Reader, writer Writer, options ...CopyOption) error {
 		return err
 	}
 	return nil
+}
+
+var ErrNotTimeoutReader = newError("not a TimeoutReader")
+
+func CopyOnceTimeout(reader Reader, writer Writer, timeout time.Duration) error {
+	timeoutReader, ok := reader.(TimeoutReader)
+	if !ok {
+		return ErrNotTimeoutReader
+	}
+	mb, err := timeoutReader.ReadMultiBufferTimeout(timeout)
+	if err != nil {
+		return err
+	}
+	return writer.WriteMultiBuffer(mb)
 }

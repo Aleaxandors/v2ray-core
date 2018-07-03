@@ -6,9 +6,10 @@ import (
 	"context"
 	"time"
 
-	"v2ray.com/core/app"
-	"v2ray.com/core/app/log"
-	"v2ray.com/core/app/policy"
+	"v2ray.com/core/common/session"
+	"v2ray.com/core/common/task"
+
+	"v2ray.com/core"
 	"v2ray.com/core/common"
 	"v2ray.com/core/common/buf"
 	"v2ray.com/core/common/net"
@@ -19,22 +20,17 @@ import (
 	"v2ray.com/core/proxy/vmess"
 	"v2ray.com/core/proxy/vmess/encoding"
 	"v2ray.com/core/transport/internet"
-	"v2ray.com/core/transport/ray"
 )
 
 // Handler is an outbound connection handler for VMess protocol.
 type Handler struct {
-	serverList    *protocol.ServerList
-	serverPicker  protocol.ServerPicker
-	policyManager policy.Manager
+	serverList   *protocol.ServerList
+	serverPicker protocol.ServerPicker
+	v            *core.Instance
 }
 
+// New creates a new VMess outbound handler.
 func New(ctx context.Context, config *Config) (*Handler, error) {
-	space := app.SpaceFromContext(ctx)
-	if space == nil {
-		return nil, newError("no space in context.")
-	}
-
 	serverList := protocol.NewServerList()
 	for _, rec := range config.Receiver {
 		serverList.AddServer(protocol.NewServerSpecFromPB(*rec))
@@ -42,22 +38,14 @@ func New(ctx context.Context, config *Config) (*Handler, error) {
 	handler := &Handler{
 		serverList:   serverList,
 		serverPicker: protocol.NewRoundRobinServerPicker(serverList),
+		v:            core.MustFromContext(ctx),
 	}
-
-	space.On(app.SpaceInitializing, func(interface{}) error {
-		pm := policy.FromSpace(space)
-		if pm == nil {
-			return newError("Policy is not found in space.")
-		}
-		handler.policyManager = pm
-		return nil
-	})
 
 	return handler, nil
 }
 
 // Process implements proxy.Outbound.Process().
-func (v *Handler) Process(ctx context.Context, outboundRay ray.OutboundRay, dialer proxy.Dialer) error {
+func (v *Handler) Process(ctx context.Context, link *core.Link, dialer proxy.Dialer) error {
 	var rec *protocol.ServerSpec
 	var conn internet.Connection
 
@@ -74,21 +62,22 @@ func (v *Handler) Process(ctx context.Context, outboundRay ray.OutboundRay, dial
 	if err != nil {
 		return newError("failed to find an available destination").Base(err).AtWarning()
 	}
-	defer conn.Close()
+	defer conn.Close() //nolint: errcheck
 
 	target, ok := proxy.TargetFromContext(ctx)
 	if !ok {
 		return newError("target not specified").AtError()
 	}
-	log.Trace(newError("tunneling request to ", target, " via ", rec.Destination()))
+	newError("tunneling request to ", target, " via ", rec.Destination()).WriteToLog(session.ExportIDToError(ctx))
 
 	command := protocol.RequestCommandTCP
 	if target.Network == net.Network_UDP {
 		command = protocol.RequestCommandUDP
 	}
-	if target.Address.Family().IsDomain() && target.Address.Domain() == "v1.mux.com" {
+	if target.Address.Family().IsDomain() && target.Address.Domain() == "v1.mux.cool" {
 		command = protocol.RequestCommandMux
 	}
+
 	request := &protocol.RequestHeader{
 		Version: encoding.Version,
 		User:    rec.PickUser(),
@@ -105,35 +94,30 @@ func (v *Handler) Process(ctx context.Context, outboundRay ray.OutboundRay, dial
 	account := rawAccount.(*vmess.InternalAccount)
 	request.Security = account.Security
 
-	if request.Security.Is(protocol.SecurityType_AES128_GCM) || request.Security.Is(protocol.SecurityType_NONE) || request.Security.Is(protocol.SecurityType_CHACHA20_POLY1305) {
+	if request.Security == protocol.SecurityType_AES128_GCM || request.Security == protocol.SecurityType_NONE || request.Security == protocol.SecurityType_CHACHA20_POLY1305 {
 		request.Option.Set(protocol.RequestOptionChunkMasking)
 	}
 
-	input := outboundRay.OutboundInput()
-	output := outboundRay.OutboundOutput()
+	input := link.Reader
+	output := link.Writer
 
 	session := encoding.NewClientSession(protocol.DefaultIDHash)
-	sessionPolicy := v.policyManager.GetPolicy(request.User.Level)
+	sessionPolicy := v.v.PolicyManager().ForLevel(request.User.Level)
 
 	ctx, cancel := context.WithCancel(ctx)
-	timer := signal.CancelAfterInactivity(ctx, cancel, sessionPolicy.Timeout.ConnectionIdle.Duration())
+	timer := signal.CancelAfterInactivity(ctx, cancel, sessionPolicy.Timeouts.ConnectionIdle)
 
-	requestDone := signal.ExecuteAsync(func() error {
+	requestDone := func() error {
+		defer timer.SetTimeout(sessionPolicy.Timeouts.DownlinkOnly)
+
 		writer := buf.NewBufferedWriter(buf.NewWriter(conn))
 		if err := session.EncodeRequestHeader(request, writer); err != nil {
 			return newError("failed to encode request").Base(err).AtWarning()
 		}
 
 		bodyWriter := session.EncodeRequestBody(request, writer)
-		firstPayload, err := input.ReadTimeout(time.Millisecond * 500)
-		if err != nil && err != buf.ErrReadTimeout {
-			return newError("failed to get first payload").Base(err)
-		}
-		if !firstPayload.IsEmpty() {
-			if err := bodyWriter.WriteMultiBuffer(firstPayload); err != nil {
-				return newError("failed to write first payload").Base(err)
-			}
-			firstPayload.Release()
+		if err := buf.CopyOnceTimeout(input, bodyWriter, time.Millisecond*500); err != nil && err != buf.ErrNotTimeoutReader && err != buf.ErrReadTimeout {
+			return newError("failed to write first payload").Base(err)
 		}
 
 		if err := writer.SetBuffered(false); err != nil {
@@ -149,27 +133,28 @@ func (v *Handler) Process(ctx context.Context, outboundRay ray.OutboundRay, dial
 				return err
 			}
 		}
-		timer.SetTimeout(sessionPolicy.Timeout.DownlinkOnly.Duration())
+
 		return nil
-	})
+	}
 
-	responseDone := signal.ExecuteAsync(func() error {
-		defer output.Close()
-		defer timer.SetTimeout(sessionPolicy.Timeout.UplinkOnly.Duration())
+	responseDone := func() error {
+		defer timer.SetTimeout(sessionPolicy.Timeouts.UplinkOnly)
 
-		reader := buf.NewBufferedReader(buf.NewReader(conn))
+		reader := &buf.BufferedReader{Reader: buf.NewReader(conn)}
 		header, err := session.DecodeResponseHeader(reader)
 		if err != nil {
-			return err
+			return newError("failed to read header").Base(err)
 		}
 		v.handleCommand(rec.Destination(), header.Command)
 
-		reader.SetBuffered(false)
+		reader.Direct = true
 		bodyReader := session.DecodeResponseBody(request, reader)
-		return buf.Copy(bodyReader, output, buf.UpdateActivity(timer))
-	})
 
-	if err := signal.ErrorOrFinish2(ctx, requestDone, responseDone); err != nil {
+		return buf.Copy(bodyReader, output, buf.UpdateActivity(timer))
+	}
+
+	var responseDonePost = task.Single(responseDone, task.OnSuccess(task.Close(output)))
+	if err := task.Run(task.WithContext(ctx), task.Parallel(requestDone, responseDonePost))(); err != nil {
 		return newError("connection ends").Base(err)
 	}
 

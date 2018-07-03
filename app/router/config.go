@@ -32,7 +32,7 @@ func cidrToCondition(cidr []*CIDR, source bool) (Condition, error) {
 			}
 			ipv6Cond.Add(matcher)
 		default:
-			return nil, newError("invalid IP length").AtError()
+			return nil, newError("invalid IP length").AtWarning()
 		}
 	}
 
@@ -59,12 +59,12 @@ func (rr *RoutingRule) BuildCondition() (Condition, error) {
 		conds.Add(matcher)
 	}
 
-	if len(rr.Cidr) > 0 {
-		cond, err := cidrToCondition(rr.Cidr, false)
-		if err != nil {
-			return nil, err
-		}
-		conds.Add(cond)
+	if len(rr.UserEmail) > 0 {
+		conds.Add(NewUserMatcher(rr.UserEmail))
+	}
+
+	if len(rr.InboundTag) > 0 {
+		conds.Add(NewInboundTagMatcher(rr.InboundTag))
 	}
 
 	if rr.PortRange != nil {
@@ -75,6 +75,14 @@ func (rr *RoutingRule) BuildCondition() (Condition, error) {
 		conds.Add(NewNetworkMatcher(rr.NetworkList))
 	}
 
+	if len(rr.Cidr) > 0 {
+		cond, err := cidrToCondition(rr.Cidr, false)
+		if err != nil {
+			return nil, err
+		}
+		conds.Add(cond)
+	}
+
 	if len(rr.SourceCidr) > 0 {
 		cond, err := cidrToCondition(rr.SourceCidr, true)
 		if err != nil {
@@ -83,16 +91,8 @@ func (rr *RoutingRule) BuildCondition() (Condition, error) {
 		conds.Add(cond)
 	}
 
-	if len(rr.UserEmail) > 0 {
-		conds.Add(NewUserMatcher(rr.UserEmail))
-	}
-
-	if len(rr.InboundTag) > 0 {
-		conds.Add(NewInboundTagMatcher(rr.InboundTag))
-	}
-
 	if conds.Len() == 0 {
-		return nil, newError("this rule has no effective fields").AtError()
+		return nil, newError("this rule has no effective fields").AtWarning()
 	}
 
 	return conds, nil

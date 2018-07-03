@@ -65,13 +65,7 @@ func TestEquals(t *testing.T) {
 	var uuid *UUID = nil
 	var uuid2 *UUID = nil
 	assert(uuid.Equals(uuid2), IsTrue)
-	assert(uuid.Equals(New()), IsFalse)
-}
 
-func TestNext(t *testing.T) {
-	assert := With(t)
-
-	uuid := New()
-	uuid2 := uuid.Next()
-	assert(uuid.Equals(uuid2), IsFalse)
+	uuid3 := New()
+	assert(uuid.Equals(&uuid3), IsFalse)
 }
