@@ -37,7 +37,7 @@ type tcpWorker struct {
 	recvOrigDest    bool
 	tag             string
 	dispatcher      core.Dispatcher
-	sniffers        []proxyman.KnownProtocols
+	sniffingConfig  *proxyman.SniffingConfig
 	uplinkCounter   core.StatCounter
 	downlinkCounter core.StatCounter
 
@@ -63,8 +63,8 @@ func (w *tcpWorker) callback(conn internet.Connection) {
 	}
 	ctx = proxy.ContextWithInboundEntryPoint(ctx, net.TCPDestination(w.address, w.port))
 	ctx = proxy.ContextWithSource(ctx, net.DestinationFromAddr(conn.RemoteAddr()))
-	if len(w.sniffers) > 0 {
-		ctx = proxyman.ContextWithProtocolSniffers(ctx, w.sniffers)
+	if w.sniffingConfig != nil {
+		ctx = proxyman.ContextWithSniffingConfig(ctx, w.sniffingConfig)
 	}
 	if w.uplinkCounter != nil || w.downlinkCounter != nil {
 		conn = &internet.StatCouterConnection{
@@ -317,9 +317,16 @@ func (w *udpWorker) removeConn(id connID) {
 	w.Unlock()
 }
 
+func (w *udpWorker) handlePackets() {
+	receive := w.hub.Receive()
+	for payload := range receive {
+		w.callback(payload.Content, payload.Source, payload.OriginalDestination)
+	}
+}
+
 func (w *udpWorker) Start() error {
 	w.activeConn = make(map[connID]*udpConn, 16)
-	h, err := udp.ListenUDP(w.address, w.port, w.callback, udp.HubReceiveOriginalDestination(w.recvOrigDest), udp.HubCapacity(256))
+	h, err := udp.ListenUDP(w.address, w.port, udp.HubReceiveOriginalDestination(w.recvOrigDest), udp.HubCapacity(256))
 	if err != nil {
 		return err
 	}
@@ -352,6 +359,7 @@ func (w *udpWorker) Start() error {
 		return err
 	}
 	w.hub = h
+	go w.handlePackets()
 	return nil
 }
 

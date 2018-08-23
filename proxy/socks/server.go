@@ -68,11 +68,10 @@ func (s *Server) Process(ctx context.Context, network net.Network, conn internet
 }
 
 func (s *Server) processTCP(ctx context.Context, conn internet.Connection, dispatcher core.Dispatcher) error {
-	if err := conn.SetReadDeadline(time.Now().Add(s.policy().Timeouts.Handshake)); err != nil {
+	plcy := s.policy()
+	if err := conn.SetReadDeadline(time.Now().Add(plcy.Timeouts.Handshake)); err != nil {
 		newError("failed to set deadline").Base(err).WriteToLog(session.ExportIDToError(ctx))
 	}
-
-	reader := &buf.BufferedReader{Reader: buf.NewReader(conn)}
 
 	inboundDest, ok := proxy.InboundEntryPointFromContext(ctx)
 	if !ok {
@@ -83,6 +82,7 @@ func (s *Server) processTCP(ctx context.Context, conn internet.Connection, dispa
 		port:   inboundDest.Port,
 	}
 
+	reader := &buf.BufferedReader{Reader: buf.NewReader(conn)}
 	request, err := svrSession.Handshake(reader, conn)
 	if err != nil {
 		if source, ok := proxy.SourceFromContext(ctx); ok {
@@ -141,9 +141,7 @@ func (s *Server) transport(ctx context.Context, reader io.Reader, writer io.Writ
 
 	requestDone := func() error {
 		defer timer.SetTimeout(plcy.Timeouts.DownlinkOnly)
-
-		v2reader := buf.NewReader(reader)
-		if err := buf.Copy(v2reader, link.Writer, buf.UpdateActivity(timer)); err != nil {
+		if err := buf.Copy(buf.NewReader(reader), link.Writer, buf.UpdateActivity(timer)); err != nil {
 			return newError("failed to transport all TCP request").Base(err)
 		}
 
@@ -172,7 +170,23 @@ func (s *Server) transport(ctx context.Context, reader io.Reader, writer io.Writ
 }
 
 func (s *Server) handleUDPPayload(ctx context.Context, conn internet.Connection, dispatcher core.Dispatcher) error {
-	udpServer := udp.NewDispatcher(dispatcher)
+	udpServer := udp.NewDispatcher(dispatcher, func(ctx context.Context, payload *buf.Buffer) {
+		newError("writing back UDP response with ", payload.Len(), " bytes").AtDebug().WriteToLog(session.ExportIDToError(ctx))
+
+		request := protocol.RequestHeaderFromContext(ctx)
+		if request == nil {
+			return
+		}
+		udpMessage, err := EncodeUDPPacket(request, payload.Bytes())
+		payload.Release()
+
+		defer udpMessage.Release()
+		if err != nil {
+			newError("failed to write UDP response").AtWarning().Base(err).WriteToLog(session.ExportIDToError(ctx))
+		}
+
+		conn.Write(udpMessage.Bytes()) // nolint: errcheck
+	})
 
 	if source, ok := proxy.SourceFromContext(ctx); ok {
 		newError("client UDP connection from ", source).WriteToLog(session.ExportIDToError(ctx))
@@ -209,19 +223,8 @@ func (s *Server) handleUDPPayload(ctx context.Context, conn internet.Connection,
 				})
 			}
 
-			udpServer.Dispatch(ctx, request.Destination(), payload, func(payload *buf.Buffer) {
-				newError("writing back UDP response with ", payload.Len(), " bytes").AtDebug().WriteToLog(session.ExportIDToError(ctx))
-
-				udpMessage, err := EncodeUDPPacket(request, payload.Bytes())
-				payload.Release()
-
-				defer udpMessage.Release()
-				if err != nil {
-					newError("failed to write UDP response").AtWarning().Base(err).WriteToLog(session.ExportIDToError(ctx))
-				}
-
-				conn.Write(udpMessage.Bytes()) // nolint: errcheck
-			})
+			ctx = protocol.ContextWithRequestHeader(ctx, request)
+			udpServer.Dispatch(ctx, request.Destination(), payload)
 		}
 	}
 }

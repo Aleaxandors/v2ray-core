@@ -141,14 +141,13 @@ func (m *Client) monitor() {
 			size := m.sessionManager.Size()
 			if size == 0 && m.sessionManager.CloseIfNoSession() {
 				common.Must(m.done.Close())
-				return
 			}
 		}
 	}
 }
 
 func writeFirstPayload(reader buf.Reader, writer *Writer) error {
-	err := buf.CopyOnceTimeout(reader, writer, time.Millisecond*200)
+	err := buf.CopyOnceTimeout(reader, writer, time.Millisecond*100)
 	if err == buf.ErrNotTimeoutReader || err == buf.ErrReadTimeout {
 		return writer.WriteMultiBuffer(buf.MultiBuffer{})
 	}

@@ -2,6 +2,7 @@ package buf
 
 import (
 	"io"
+	"syscall"
 	"time"
 )
 
@@ -39,11 +40,16 @@ func ReadFullFrom(reader io.Reader, size int32) Supplier {
 	}
 }
 
-// ReadAtLeastFrom create a Supplier to read at least size bytes from the given io.Reader.
-func ReadAtLeastFrom(reader io.Reader, size int) Supplier {
-	return func(b []byte) (int, error) {
-		return io.ReadAtLeast(reader, b, size)
+// WriteAllBytes ensures all bytes are written into the given writer.
+func WriteAllBytes(writer io.Writer, payload []byte) error {
+	for len(payload) > 0 {
+		n, err := writer.Write(payload)
+		if err != nil {
+			return err
+		}
+		payload = payload[n:]
 	}
+	return nil
 }
 
 // NewReader creates a new Reader.
@@ -53,7 +59,7 @@ func NewReader(reader io.Reader) Reader {
 		return mr
 	}
 
-	return NewBytesToBufferReader(reader)
+	return newReaderPlatform(reader)
 }
 
 // NewWriter creates a new Writer.
@@ -62,14 +68,14 @@ func NewWriter(writer io.Writer) Writer {
 		return mw
 	}
 
+	if _, ok := writer.(syscall.Conn); !ok {
+		// If the writer doesn't implement syscall.Conn, it is probably not a TCP connection.
+		return &SequentialWriter{
+			Writer: writer,
+		}
+	}
+
 	return &BufferToBytesWriter{
 		Writer: writer,
-	}
-}
-
-// NewSequentialWriter returns a Writer that write Buffers in a MultiBuffer sequentially.
-func NewSequentialWriter(writer io.Writer) Writer {
-	return &seqWriter{
-		writer: writer,
 	}
 }

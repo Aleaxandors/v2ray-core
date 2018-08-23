@@ -20,6 +20,11 @@ func (c *executionContext) executeTask() error {
 		return nil
 	}
 
+	// Reuse current goroutine if we only have one task to run.
+	if len(c.tasks) == 1 && c.ctx == nil {
+		return c.tasks[0]()
+	}
+
 	ctx := context.Background()
 
 	if c.ctx != nil {
@@ -83,8 +88,8 @@ func OnFailure(task Task) ExecutionOption {
 	}
 }
 
-func Single(task Task, opts ExecutionOption) Task {
-	return Run(append([]ExecutionOption{Sequential(task)}, opts)...)
+func Single(task Task, opts ...ExecutionOption) Task {
+	return Run(append([]ExecutionOption{Sequential(task)}, opts...)...)
 }
 
 func Run(opts ...ExecutionOption) Task {
@@ -115,14 +120,17 @@ func executeParallel(ctx context.Context, tasks []Task) error {
 
 	for _, task := range tasks {
 		<-s.Wait()
-		go func(f func() error) {
-			if err := f(); err != nil {
-				select {
-				case done <- err:
-				default:
-				}
+		go func(f Task) {
+			err := f()
+			if err == nil {
+				s.Signal()
+				return
 			}
-			s.Signal()
+
+			select {
+			case done <- err:
+			default:
+			}
 		}(task)
 	}
 

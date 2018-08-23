@@ -65,15 +65,25 @@ func (h *Handler) resolveIP(ctx context.Context, domain string) net.Address {
 	return net.IPAddress(ips[dice.Roll(len(ips))])
 }
 
+func isValidAddress(addr *net.IPOrDomain) bool {
+	if addr == nil {
+		return false
+	}
+
+	a := addr.AsAddress()
+	return a != net.AnyIP
+}
+
 // Process implements proxy.Outbound.
 func (h *Handler) Process(ctx context.Context, link *core.Link, dialer proxy.Dialer) error {
 	destination, _ := proxy.TargetFromContext(ctx)
 	if h.config.DestinationOverride != nil {
 		server := h.config.DestinationOverride.Server
-		destination = net.Destination{
-			Network: destination.Network,
-			Address: server.Address.AsAddress(),
-			Port:    net.Port(server.Port),
+		if isValidAddress(server.Address) {
+			destination.Address = server.Address.AsAddress()
+		}
+		if server.Port != 0 {
+			destination.Port = net.Port(server.Port)
 		}
 	}
 	newError("opening connection to ", destination).WriteToLog(session.ExportIDToError(ctx))
@@ -108,17 +118,18 @@ func (h *Handler) Process(ctx context.Context, link *core.Link, dialer proxy.Dia
 	}
 	defer conn.Close() // nolint: errcheck
 
+	plcy := h.policy()
 	ctx, cancel := context.WithCancel(ctx)
-	timer := signal.CancelAfterInactivity(ctx, cancel, h.policy().Timeouts.ConnectionIdle)
+	timer := signal.CancelAfterInactivity(ctx, cancel, plcy.Timeouts.ConnectionIdle)
 
 	requestDone := func() error {
-		defer timer.SetTimeout(h.policy().Timeouts.DownlinkOnly)
+		defer timer.SetTimeout(plcy.Timeouts.DownlinkOnly)
 
 		var writer buf.Writer
 		if destination.Network == net.Network_TCP {
 			writer = buf.NewWriter(conn)
 		} else {
-			writer = buf.NewSequentialWriter(conn)
+			writer = &buf.SequentialWriter{Writer: conn}
 		}
 		if err := buf.Copy(input, writer, buf.UpdateActivity(timer)); err != nil {
 			return newError("failed to process request").Base(err)
@@ -128,10 +139,9 @@ func (h *Handler) Process(ctx context.Context, link *core.Link, dialer proxy.Dia
 	}
 
 	responseDone := func() error {
-		defer timer.SetTimeout(h.policy().Timeouts.UplinkOnly)
+		defer timer.SetTimeout(plcy.Timeouts.UplinkOnly)
 
-		v2reader := buf.NewReader(conn)
-		if err := buf.Copy(v2reader, output, buf.UpdateActivity(timer)); err != nil {
+		if err := buf.Copy(buf.NewReader(conn), output, buf.UpdateActivity(timer)); err != nil {
 			return newError("failed to process response").Base(err)
 		}
 

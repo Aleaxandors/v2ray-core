@@ -3,6 +3,7 @@ package buf_test
 import (
 	"bytes"
 	"io"
+	"runtime"
 	"testing"
 
 	. "v2ray.com/core/common/buf"
@@ -11,12 +12,17 @@ import (
 )
 
 func TestAdaptiveReader(t *testing.T) {
+	if runtime.GOARCH != "amd64" {
+		t.Skip("Smart reader only works on highend devices.")
+		return
+	}
+
 	assert := With(t)
 
 	reader := NewReader(bytes.NewReader(make([]byte, 1024*1024)))
 	b, err := reader.ReadMultiBuffer()
 	assert(err, IsNil)
-	assert(b.Len(), Equals, int32(2*1024))
+	assert(b.Len(), Equals, int32(Size))
 
 	b, err = reader.ReadMultiBuffer()
 	assert(err, IsNil)
@@ -29,10 +35,6 @@ func TestAdaptiveReader(t *testing.T) {
 	b, err = reader.ReadMultiBuffer()
 	assert(err, IsNil)
 	assert(b.Len(), Equals, int32(128*1024))
-
-	b, err = reader.ReadMultiBuffer()
-	assert(err, IsNil)
-	assert(b.Len(), Equals, int32(512*1024))
 }
 
 func TestBytesReaderWriteTo(t *testing.T) {
@@ -41,9 +43,9 @@ func TestBytesReaderWriteTo(t *testing.T) {
 	pReader, pWriter := pipe.New(pipe.WithSizeLimit(1024))
 	reader := &BufferedReader{Reader: pReader}
 	b1 := New()
-	b1.AppendBytes('a', 'b', 'c')
+	b1.WriteBytes('a', 'b', 'c')
 	b2 := New()
-	b2.AppendBytes('e', 'f', 'g')
+	b2.WriteBytes('e', 'f', 'g')
 	assert(pWriter.WriteMultiBuffer(NewMultiBufferValue(b1, b2)), IsNil)
 	pWriter.Close()
 
@@ -68,9 +70,9 @@ func TestBytesReaderMultiBuffer(t *testing.T) {
 	pReader, pWriter := pipe.New(pipe.WithSizeLimit(1024))
 	reader := &BufferedReader{Reader: pReader}
 	b1 := New()
-	b1.AppendBytes('a', 'b', 'c')
+	b1.WriteBytes('a', 'b', 'c')
 	b2 := New()
-	b2.AppendBytes('e', 'f', 'g')
+	b2.WriteBytes('e', 'f', 'g')
 	assert(pWriter.WriteMultiBuffer(NewMultiBufferValue(b1, b2)), IsNil)
 	pWriter.Close()
 

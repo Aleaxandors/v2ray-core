@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"websocket"
+	"github.com/gorilla/websocket"
 
 	"v2ray.com/core/common"
 	"v2ray.com/core/common/net"
@@ -25,7 +25,7 @@ func Dial(ctx context.Context, dest net.Destination) (internet.Connection, error
 }
 
 func init() {
-	common.Must(internet.RegisterTransportDialer(internet.TransportProtocol_WebSocket, Dial))
+	common.Must(internet.RegisterTransportDialer(protocolName, Dial))
 }
 
 func dialWebsocket(ctx context.Context, dest net.Destination) (net.Conn, error) {

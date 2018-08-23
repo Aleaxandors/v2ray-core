@@ -4,16 +4,15 @@ import (
 	"context"
 	"time"
 
-	"v2ray.com/core/common/session"
-	"v2ray.com/core/common/task"
-
 	"v2ray.com/core"
 	"v2ray.com/core/common"
 	"v2ray.com/core/common/buf"
 	"v2ray.com/core/common/log"
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/protocol"
+	"v2ray.com/core/common/session"
 	"v2ray.com/core/common/signal"
+	"v2ray.com/core/common/task"
 	"v2ray.com/core/proxy"
 	"v2ray.com/core/transport/internet"
 	"v2ray.com/core/transport/internet/udp"
@@ -74,7 +73,22 @@ func (s *Server) Process(ctx context.Context, network net.Network, conn internet
 }
 
 func (s *Server) handlerUDPPayload(ctx context.Context, conn internet.Connection, dispatcher core.Dispatcher) error {
-	udpServer := udp.NewDispatcher(dispatcher)
+	udpServer := udp.NewDispatcher(dispatcher, func(ctx context.Context, payload *buf.Buffer) {
+		request := protocol.RequestHeaderFromContext(ctx)
+		if request == nil {
+			return
+		}
+
+		data, err := EncodeUDPPacket(request, payload.Bytes())
+		payload.Release()
+		if err != nil {
+			newError("failed to encode UDP packet").Base(err).AtWarning().WriteToLog(session.ExportIDToError(ctx))
+			return
+		}
+		defer data.Release()
+
+		conn.Write(data.Bytes())
+	})
 
 	reader := buf.NewReader(conn)
 	for {
@@ -123,17 +137,8 @@ func (s *Server) handlerUDPPayload(ctx context.Context, conn internet.Connection
 			newError("tunnelling request to ", dest).WriteToLog(session.ExportIDToError(ctx))
 
 			ctx = protocol.ContextWithUser(ctx, request.User)
-			udpServer.Dispatch(ctx, dest, data, func(payload *buf.Buffer) {
-				data, err := EncodeUDPPacket(request, payload.Bytes())
-				payload.Release()
-				if err != nil {
-					newError("failed to encode UDP packet").Base(err).AtWarning().WriteToLog(session.ExportIDToError(ctx))
-					return
-				}
-				defer data.Release()
-
-				conn.Write(data.Bytes())
-			})
+			ctx = protocol.ContextWithRequestHeader(ctx, request)
+			udpServer.Dispatch(ctx, dest, data)
 		}
 	}
 
@@ -143,6 +148,7 @@ func (s *Server) handlerUDPPayload(ctx context.Context, conn internet.Connection
 func (s *Server) handleConnection(ctx context.Context, conn internet.Connection, dispatcher core.Dispatcher) error {
 	sessionPolicy := s.v.PolicyManager().ForLevel(s.user.Level)
 	conn.SetReadDeadline(time.Now().Add(sessionPolicy.Timeouts.Handshake))
+
 	bufferedReader := buf.BufferedReader{Reader: buf.NewReader(conn)}
 	request, bodyReader, err := ReadTCPSession(s.user, &bufferedReader)
 	if err != nil {
@@ -155,8 +161,6 @@ func (s *Server) handleConnection(ctx context.Context, conn internet.Connection,
 		return newError("failed to create request from: ", conn.RemoteAddr()).Base(err)
 	}
 	conn.SetReadDeadline(time.Time{})
-
-	bufferedReader.Direct = true
 
 	dest := request.Destination()
 	log.Record(&log.AccessMessage{
