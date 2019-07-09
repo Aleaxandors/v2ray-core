@@ -1,3 +1,5 @@
+// +build !wasm
+
 package buf
 
 import (
@@ -46,6 +48,7 @@ type multiReader interface {
 	Clear()
 }
 
+// ReadVReader is a Reader that uses readv(2) syscall to read data.
 type ReadVReader struct {
 	io.Reader
 	rawConn syscall.RawConn
@@ -53,6 +56,7 @@ type ReadVReader struct {
 	alloc   allocStrategy
 }
 
+// NewReadVReader creates a new ReadVReader.
 func NewReadVReader(reader io.Reader, rawConn syscall.RawConn) *ReadVReader {
 	return &ReadVReader{
 		Reader:  reader,
@@ -81,14 +85,12 @@ func (r *ReadVReader) readMulti() (MultiBuffer, error) {
 	r.mr.Clear()
 
 	if err != nil {
-		mb := MultiBuffer(bs)
-		mb.Release()
+		ReleaseMulti(MultiBuffer(bs))
 		return nil, err
 	}
 
 	if nBytes == 0 {
-		mb := MultiBuffer(bs)
-		mb.Release()
+		ReleaseMulti(MultiBuffer(bs))
 		return nil, io.EOF
 	}
 
@@ -97,7 +99,7 @@ func (r *ReadVReader) readMulti() (MultiBuffer, error) {
 		if nBytes <= 0 {
 			break
 		}
-		end := int32(nBytes)
+		end := nBytes
 		if end > Size {
 			end = Size
 		}
@@ -117,14 +119,14 @@ func (r *ReadVReader) readMulti() (MultiBuffer, error) {
 // ReadMultiBuffer implements Reader.
 func (r *ReadVReader) ReadMultiBuffer() (MultiBuffer, error) {
 	if r.alloc.Current() == 1 {
-		b, err := readOne(r.Reader)
+		b, err := ReadBuffer(r.Reader)
 		if err != nil {
 			return nil, err
 		}
 		if b.IsFull() {
 			r.alloc.Adjust(1)
 		}
-		return NewMultiBufferValue(b), nil
+		return MultiBuffer{b}, nil
 	}
 
 	mb, err := r.readMulti()
@@ -140,7 +142,12 @@ var useReadv = false
 func init() {
 	const defaultFlagValue = "NOT_DEFINED_AT_ALL"
 	value := platform.NewEnvFlag("v2ray.buf.readv").GetValue(func() string { return defaultFlagValue })
-	if value != defaultFlagValue && (runtime.GOOS == "linux" || runtime.GOOS == "darwin") {
+	switch value {
+	case defaultFlagValue, "auto":
+		if (runtime.GOARCH == "386" || runtime.GOARCH == "amd64" || runtime.GOARCH == "s390x") && (runtime.GOOS == "linux" || runtime.GOOS == "darwin" || runtime.GOOS == "windows") {
+			useReadv = true
+		}
+	case "enable":
 		useReadv = true
 	}
 }
